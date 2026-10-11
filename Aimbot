@@ -1,0 +1,447 @@
+--[[
+  AimAssistClient  (put in StarterPlayer > StarterPlayerScripts as a LocalScript)
+
+  Aim assist for your own game: menu, wall check, team check, FOV circle, smoothing.
+
+  Menu:  tap the AIM button on the left, or press RightShift.
+  Aim:   hold Right Mouse (PC) or the AIM HOLD button (mobile).
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+
+------------------------------------------------------------------ settings
+local MENU_KEY = Enum.KeyCode.RightShift
+
+local settings = {
+	enabled = true,
+	holdToAim = true,   -- off = aims by itself whenever someone is inside the FOV
+	wallCheck = true,   -- ignore targets behind walls
+	teamCheck = true,   -- ignore teammates
+	showFov = true,
+	fov = 150,          -- FOV circle radius in pixels
+	instant = true,     -- snap straight onto the target (off = smooth, uses Strength)
+	strength = 12,      -- how fast the camera turns to the target when Instant is off
+	maxDistance = 500,  -- studs
+	targetPart = "Head", -- "Head" or "Body"
+}
+
+local state = { aiming = false }
+
+------------------------------------------------------------------ look
+local PANEL = Color3.fromRGB(24, 24, 30)
+local ROW = Color3.fromRGB(38, 38, 48)
+local OFF = Color3.fromRGB(70, 70, 84)
+local ACCENT = Color3.fromRGB(90, 170, 255)
+local TEXT = Color3.fromRGB(235, 235, 245)
+local WHITE = Color3.new(1, 1, 1)
+local GREEN = Color3.fromRGB(80, 255, 130)
+
+local function make(class, props, parent)
+	local inst = Instance.new(class)
+	for k, v in pairs(props) do
+		inst[k] = v
+	end
+	inst.Parent = parent
+	return inst
+end
+
+local function corner(parent, radius)
+	return make("UICorner", { CornerRadius = UDim.new(0, radius or 6) }, parent)
+end
+
+------------------------------------------------------------------ gui
+local gui = make("ScreenGui", {
+	Name = "AimAssistGui",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	DisplayOrder = 50,
+}, player:WaitForChild("PlayerGui"))
+
+-- FOV circle (centered on the screen)
+local fovCircle = make("Frame", {
+	Name = "FovCircle",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(settings.fov * 2, settings.fov * 2),
+	BackgroundTransparency = 1,
+	Visible = false,
+}, gui)
+make("UICorner", { CornerRadius = UDim.new(1, 0) }, fovCircle)
+local fovStroke = make("UIStroke", { Thickness = 2, Color = WHITE }, fovCircle)
+
+-- menu
+local menu = make("Frame", {
+	Name = "Menu",
+	Size = UDim2.fromOffset(250, 0),
+	AutomaticSize = Enum.AutomaticSize.Y,
+	Position = UDim2.new(0, 72, 0.5, -150),
+	BackgroundColor3 = PANEL,
+	BorderSizePixel = 0,
+	Visible = false,
+}, gui)
+corner(menu, 10)
+make("UIPadding", {
+	PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+	PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+}, menu)
+make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, menu)
+
+local title = make("TextLabel", {
+	Name = "Title",
+	Size = UDim2.new(1, 0, 0, 28),
+	BackgroundTransparency = 1,
+	Text = "Aim Assist",
+	TextColor3 = TEXT,
+	Font = Enum.Font.GothamBold,
+	TextSize = 16,
+	LayoutOrder = 0,
+}, menu)
+
+-- the controls (scrollable, height fits the screen)
+local function bodyHeight()
+	return math.clamp(gui.AbsoluteSize.Y - 140, 120, 320)
+end
+local body = make("ScrollingFrame", {
+	Name = "Body",
+	Size = UDim2.new(1, 0, 0, bodyHeight()),
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollingDirection = Enum.ScrollingDirection.Y,
+	ScrollBarThickness = 4,
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	LayoutOrder = 1,
+}, menu)
+make("UIPadding", { PaddingRight = UDim.new(0, 8) }, body)
+make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+	body.Size = UDim2.new(1, 0, 0, bodyHeight())
+end)
+
+local order = 0
+local function nextOrder()
+	order = order + 1
+	return order
+end
+
+local function addToggle(label, key)
+	local row = make("TextButton", {
+		Size = UDim2.new(1, 0, 0, 32),
+		BackgroundColor3 = ROW,
+		BorderSizePixel = 0,
+		Text = "",
+		AutoButtonColor = false,
+		LayoutOrder = nextOrder(),
+	}, body)
+	corner(row)
+	make("TextLabel", {
+		Size = UDim2.new(1, -60, 1, 0),
+		Position = UDim2.fromOffset(10, 0),
+		BackgroundTransparency = 1,
+		Text = label,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextColor3 = TEXT,
+		Font = Enum.Font.Gotham,
+		TextSize = 14,
+	}, row)
+	local pill = make("Frame", {
+		Size = UDim2.fromOffset(38, 18),
+		Position = UDim2.new(1, -48, 0.5, -9),
+		BorderSizePixel = 0,
+	}, row)
+	corner(pill, 9)
+	local knob = make("Frame", {
+		Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = WHITE,
+		BorderSizePixel = 0,
+	}, pill)
+	corner(knob, 7)
+	local function paint()
+		local on = settings[key]
+		pill.BackgroundColor3 = on and ACCENT or OFF
+		knob.Position = on and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2)
+	end
+	row.Activated:Connect(function()
+		settings[key] = not settings[key]
+		paint()
+	end)
+	paint()
+end
+
+local activeSlider = nil -- function that updates the slider being dragged
+
+local function addSlider(label, key, min, max, step)
+	local row = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 46),
+		BackgroundColor3 = ROW,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+	}, body)
+	corner(row)
+	local text = make("TextLabel", {
+		Size = UDim2.new(1, -20, 0, 20),
+		Position = UDim2.fromOffset(10, 3),
+		BackgroundTransparency = 1,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextColor3 = TEXT,
+		Font = Enum.Font.Gotham,
+		TextSize = 13,
+		Text = "",
+	}, row)
+	local track = make("Frame", {
+		Size = UDim2.new(1, -20, 0, 6),
+		Position = UDim2.new(0, 10, 0, 32),
+		BackgroundColor3 = OFF,
+		BorderSizePixel = 0,
+	}, row)
+	corner(track, 3)
+	local fill = make("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = ACCENT,
+		BorderSizePixel = 0,
+	}, track)
+	corner(fill, 3)
+	-- bigger invisible touch target over the thin track
+	local hit = make("TextButton", {
+		Size = UDim2.new(1, 0, 0, 24),
+		Position = UDim2.new(0, 0, 0.5, -12),
+		BackgroundTransparency = 1,
+		Text = "",
+	}, track)
+
+	local function setFromAlpha(a)
+		a = math.clamp(a, 0, 1)
+		local v = min + (max - min) * a
+		v = math.floor(v / step + 0.5) * step
+		settings[key] = v
+		fill.Size = UDim2.fromScale((v - min) / (max - min), 1)
+		text.Text = label .. ": " .. tostring(v)
+	end
+	local function fromInput(input)
+		setFromAlpha((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X)
+	end
+
+	setFromAlpha((settings[key] - min) / (max - min))
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			activeSlider = fromInput
+			body.ScrollingEnabled = false -- so dragging a slider doesn't scroll the menu
+			fromInput(input)
+		end
+	end)
+end
+
+local function addCycle(label, key, options)
+	local btn = make("TextButton", {
+		Size = UDim2.new(1, 0, 0, 32),
+		BackgroundColor3 = ROW,
+		BorderSizePixel = 0,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextColor3 = TEXT,
+		Font = Enum.Font.Gotham,
+		TextSize = 14,
+		LayoutOrder = nextOrder(),
+	}, body)
+	corner(btn)
+	make("UIPadding", { PaddingLeft = UDim.new(0, 10) }, btn)
+	local function paint()
+		btn.Text = label .. ": " .. tostring(settings[key])
+	end
+	btn.Activated:Connect(function()
+		local idx = table.find(options, settings[key]) or 0
+		settings[key] = options[idx % #options + 1]
+		paint()
+	end)
+	paint()
+end
+
+addToggle("Aim assist", "enabled")
+addToggle("Hold to aim", "holdToAim")
+addToggle("Instant lock", "instant")
+addToggle("Wall check", "wallCheck")
+addToggle("Team check", "teamCheck")
+addToggle("Show FOV circle", "showFov")
+addSlider("FOV size", "fov", 40, 400, 5)
+addSlider("Strength (if not instant)", "strength", 1, 30, 1)
+addSlider("Max distance", "maxDistance", 50, 1000, 10)
+addCycle("Target", "targetPart", { "Head", "Body" })
+make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 30),
+	BackgroundTransparency = 1,
+	TextWrapped = true,
+	Text = "RightShift: menu   |   Hold Right Mouse: aim",
+	TextColor3 = Color3.fromRGB(150, 150, 165),
+	Font = Enum.Font.Gotham,
+	TextSize = 12,
+	LayoutOrder = nextOrder(),
+}, body)
+
+-- drag the menu by its title
+local dragging, dragStart, startPos = false, nil, nil
+title.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = menu.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	local moving = input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch
+	if not moving then
+		return
+	end
+	if activeSlider then
+		activeSlider(input)
+	elseif dragging then
+		local d = input.Position - dragStart
+		menu.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+		activeSlider = nil
+		body.ScrollingEnabled = true
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		state.aiming = false
+	end
+end)
+
+-- open / close
+local openBtn = make("TextButton", {
+	Name = "OpenMenu",
+	Size = UDim2.fromOffset(56, 36),
+	Position = UDim2.new(0, 8, 0.5, -18),
+	BackgroundColor3 = PANEL,
+	BorderSizePixel = 0,
+	Text = "AIM",
+	TextColor3 = TEXT,
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+}, gui)
+corner(openBtn, 8)
+openBtn.Activated:Connect(function()
+	menu.Visible = not menu.Visible
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if input.KeyCode == MENU_KEY and not gameProcessed then
+		menu.Visible = not menu.Visible
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		state.aiming = true
+	end
+end)
+
+-- mobile: on-screen hold button
+if UserInputService.TouchEnabled then
+	local holdBtn = make("TextButton", {
+		Name = "AimHold",
+		Size = UDim2.fromOffset(80, 80),
+		Position = UDim2.new(1, -120, 1, -240),
+		BackgroundColor3 = PANEL,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		Text = "AIM\nHOLD",
+		TextColor3 = TEXT,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+	}, gui)
+	corner(holdBtn, 40)
+	holdBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			state.aiming = true
+		end
+	end)
+	holdBtn.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			state.aiming = false
+		end
+	end)
+end
+
+------------------------------------------------------------------ aiming
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.RespectCanCollide = true
+
+local function getAimPart(character)
+	if settings.targetPart == "Head" then
+		return character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
+	end
+	return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
+end
+
+-- true when nothing solid is between the camera and the target
+local function isVisible(origin, part, character)
+	local mine = player.Character
+	rayParams.FilterDescendantsInstances = mine and { mine } or {}
+	local result = workspace:Raycast(origin, part.Position - origin, rayParams)
+	return result == nil or result.Instance:IsDescendantOf(character)
+end
+
+local function findTarget(cam)
+	local center = cam.ViewportSize / 2
+	local origin = cam.CFrame.Position
+	local best, bestDist = nil, settings.fov
+
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player then
+			local char = other.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local sameTeam = settings.teamCheck and player.Team ~= nil and other.Team == player.Team
+			if hum and hum.Health > 0 and not sameTeam then
+				local part = getAimPart(char)
+				if part and (part.Position - origin).Magnitude <= settings.maxDistance then
+					local screen, onScreen = cam:WorldToViewportPoint(part.Position)
+					if onScreen then
+						local dist = (Vector2.new(screen.X, screen.Y) - center).Magnitude
+						if dist <= bestDist and (not settings.wallCheck or isVisible(origin, part, char)) then
+							best, bestDist = part, dist
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+RunService:BindToRenderStep("AimAssist", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	local cam = workspace.CurrentCamera
+	local active = settings.enabled and cam ~= nil
+
+	fovCircle.Visible = active and settings.showFov
+	fovCircle.Size = UDim2.fromOffset(settings.fov * 2, settings.fov * 2)
+	fovStroke.Color = WHITE
+
+	if not active then
+		return
+	end
+	if settings.holdToAim and not state.aiming then
+		return
+	end
+
+	local target = findTarget(cam)
+	if target then
+		fovStroke.Color = GREEN
+		local goal = CFrame.lookAt(cam.CFrame.Position, target.Position)
+		if settings.instant then
+			cam.CFrame = goal -- snap straight onto the target
+		else
+			local alpha = 1 - math.exp(-settings.strength * dt)
+			cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+		end
+	end
+end)
